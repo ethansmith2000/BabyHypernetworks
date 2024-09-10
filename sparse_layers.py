@@ -62,6 +62,11 @@ class BlockwiseDiagLinear(nn.Module):
 
     """
     Sparse linear layer that spares parameters by only maintaining blockwise diagonal matrices
+
+    :param full_in_dim: input dimension
+    :param full_out_dim: output dimension
+    :param heads: number of blockwise diagonal chunks to divide features along
+    :param bias: whether to add a bias term
     """
 
     def __init__(self, full_in_dim=1024, full_out_dim=1024, heads=8, bias=True):
@@ -96,6 +101,13 @@ class BlockwiseDiagLinear(nn.Module):
 class AlmostMonarch(nn.Module):
     """
     Kinda looks like monarch matrices but not really, uses a random permutation instead of the one described in the paper
+
+    :param full_in_dim: input dimension
+    :param full_out_dim: output dimension
+    :param heads: number of blockwise diagonal chunks to divide features along
+    :param heads_second: number of blockwise diagonal chunks to divide features along in the second layer
+    :param bias: whether to add a bias term
+    :param permute_mode: how to permute the features, options are random, roll, chunk
     """
 
     def __init__(self,

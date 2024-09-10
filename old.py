@@ -42,8 +42,6 @@ class AdaLoRA(nn.Module):
 class AdaLoRAMLP(nn.Module):
     """
     Feels like an AdaNorm kinda layer, but condition is projected into a LoRA which hidden states are pushed through
-
-    shout out to rami_mmo for the initial design and idea!
     """
 
     def __init__(self, feat_dim, ada_dim, inter_dim=None, rank=8, act_fn=nn.GELU, sparse_heads=None):
