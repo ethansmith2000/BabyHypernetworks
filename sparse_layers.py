@@ -9,11 +9,20 @@ import torch.nn.functional as F
 
 
 class Permute(nn.Module):
+    """
+    Permute the features of a tensor
+
+    :param full_dim: input dimension
+    :param heads: number of heads used in a preceding/succeeding BlockwiseDiagLinear, relevant for chunk setting
+    :param mode: how to permute the features, [random, roll, chunk_random]
+    :param roll: how much to roll the features if mode is roll
+    :param chunks: how many chunks to divide the features within heads, if mode is chunk_random
+    """
 
     def __init__(self,
                  full_dim,
                  heads,
-                 mode="random",  # random, roll, chunk_random
+                 mode="chunk_random",  # random, roll, chunk_random
                  roll=0.4,
                  chunks=4,  # must divide the chunk dim evenly
                  ):
@@ -25,9 +34,12 @@ class Permute(nn.Module):
         elif mode == "roll":
             permute = torch.roll(torch.arange(full_dim), roll)
         elif mode == "chunk_random":
-            assert dim % chunks == 0, "chunks must divide the dim evenly"
-            chunk_indices = torch.randperm(full_dim // (dim // chunks))
-            permute = torch.cat([torch.arange((dim // chunks)) + i * (dim // chunks) for i in chunk_indices])
+            if dim % chunks == 0:
+                chunk_indices = torch.randperm(full_dim // (dim // chunks))
+                permute = torch.cat([torch.arange((dim // chunks)) + i * (dim // chunks) for i in chunk_indices])
+            else:
+                print("chunks must divide the dim evenly, falling back to random permutation")
+                permute = torch.randperm(full_dim)
         else:
             raise NotImplementedError("mode not implemented")
         self.register_buffer("permute", permute)

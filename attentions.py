@@ -138,14 +138,9 @@ class HyperAttentionAttention(nn.Module):
         hidden_attn_dim = hidden_attn_dim or x_dim
         self.head_dim = hidden_attn_dim // heads
 
-        query = torch.randn(1, x_dim, hidden_dim)
-        key = torch.randn(1, x_dim, hidden_dim)
-        value = torch.randn(1, x_dim, hidden_dim)
+        query, key, value = map(lambda t: torch.randn(1, x_dim, hidden_dim), range(3))
         to_out = torch.randn(1, hidden_dim, x_dim)
-        torch.nn.init.kaiming_uniform_(query)
-        torch.nn.init.kaiming_uniform_(key)
-        torch.nn.init.kaiming_uniform_(value)
-        torch.nn.init.kaiming_uniform_(to_out)
+        query, key, value, to_out = map(lambda t: torch.nn.init.kaiming_uniform_(t), [query, key, value, to_out])
 
         base_weight = torch.cat([query, key, value, to_out.transpose(1, 2)], dim=1)
         self.base_weight = torch.nn.Parameter(base_weight)

@@ -6,31 +6,52 @@ from .sparse_layers import AlmostMonarch
 
 class AdaLoRA(nn.Module):
     """
-    Feels like an AdaNorm kinda layer, but condition is projected into a LoRA which hidden states are pushed through
+    Conditioning layer, can condition on external condition or input
+    condition is projected into a LoRA, low rank A and B matrices
+    which transform the input. This could potentially use a lot of parameters
+    when using a large rank, so option to use a sparse projection
 
     shout out to rami_mmo for the initial design and idea!
+
+    :param feat_dim: feature dimension
+    :param ada_dim: condition dimension
+    :param inter_dim: intermediate dimension, if act_fn is not None, this is the dimension
+                    of the hidden layer of the condition projection
+    :param rank: rank of the low rank matrices
+    :param lora_proj_act_fn: activation function for the hidden layer of the condition projection
+    :param sparse_heads: number of heads to use for the sparse projection, set to None for dense projection
+    :param norm_cond: whether to normalize the condition before projecting
     """
 
-    def __init__(self, feat_dim, ada_dim, inter_dim=None, rank=8, act_fn=nn.GELU, sparse_heads=None):
+    def __init__(self,
+                 feat_dim,
+                 ada_dim,
+                 inter_dim=None,
+                 rank=8,
+                 lora_proj_act_fn=nn.GELU,
+                 sparse_heads=None,
+                 norm_cond=True
+                 ):
         super().__init__()
         self.rank = rank
         layers = []
         inter_dim = ada_dim if inter_dim is None else inter_dim
-        if act_fn is None:
+        if lora_proj_act_fn is None:
             layers.append(nn.Linear(ada_dim, feat_dim * rank * 2))
         else:
             layers.append(nn.Linear(ada_dim, inter_dim))
-            layers.append(act_fn())
+            layers.append(lora_proj_act_fn())
             layers.append(
                 AlmostMonarch(inter_dim, feat_dim * rank * 2, sparse_heads) if sparse_heads is not None else nn.Linear(
                     inter_dim, feat_dim * rank * 2))
 
         self.gen_weight = nn.Sequential(*layers)
+        self.norm_cond = nn.LayerNorm(ada_dim) if norm_cond else nn.Identity()
 
     def forward(self, x, ada_emb):
         x_in = x
         B, D = x.shape[0], x.shape[-1]
-        x_weights = self.gen_weight(ada_emb)
+        x_weights = self.gen_weight(self.norm_cond(ada_emb))
         x_a, x_b = x_weights.chunk(2, dim=-1)
         x_a, x_b = map(lambda t: t.reshape(-1, D, self.rank), (x_a, x_b))
 
@@ -43,30 +64,50 @@ class AdaLoRA(nn.Module):
 
 class AdaLoRAMLP(nn.Module):
     """
-    Feels like an AdaNorm kinda layer, but condition is projected into a LoRA which hidden states are pushed through
+    Like AdaLoRA but generates two sets of A/B LoRA matrices and applies them in sequence
+    with an activation function in between
+
+    :param feat_dim: feature dimension
+    :param ada_dim: condition dimension
+    :param inter_dim: intermediate dimension, if act_fn is not None, this is the dimension
+                    of the hidden layer of the condition projection
+    :param rank: rank of the low rank matrices
+    :param lora_proj_act_fn: activation function for the hidden layer of the condition projection
+    :param sparse_heads: number of heads to use for the sparse projection, set to None for dense projection
+    :param act_fn: activation function to use between the two sets of A/B matrices
     """
 
-    def __init__(self, feat_dim, ada_dim, inter_dim=None, rank=8, act_fn=nn.GELU, sparse_heads=None):
+    def __init__(self,
+                 feat_dim,
+                 ada_dim,
+                 inter_dim=None,
+                 rank=8,
+                 lora_proj_act_fn=nn.GELU,
+                 sparse_heads=None,
+                 act_fn=nn.GELU,
+                 norm_cond=True
+                 ):
         super().__init__()
         self.rank = rank
         layers = []
         inter_dim = ada_dim if inter_dim is None else inter_dim
-        if act_fn is None:
+        if lora_proj_act_fn is None:
             layers.append(nn.Linear(ada_dim, feat_dim * rank * 4))
         else:
             layers.append(nn.Linear(ada_dim, inter_dim))
-            layers.append(act_fn())
+            layers.append(lora_proj_act_fn())
             layers.append(
                 AlmostMonarch(inter_dim, feat_dim * rank * 4, sparse_heads) if sparse_heads is not None else nn.Linear(
                     inter_dim, feat_dim * rank * 4))
 
         self.gen_weight = nn.Sequential(*layers)
         self.act_fn = act_fn()
+        self.norm_cond = nn.LayerNorm(ada_dim) if norm_cond else nn.Identity()
 
     def forward(self, x, ada_emb):
         x_in = x
         B, D = x.shape[0], x.shape[-1]
-        x_weights = self.gen_weight(ada_emb)
+        x_weights = self.gen_weight(self.norm_cond(ada_emb))
         x_a_1, x_b_1, x_a_2, x_b_2 = x_weights.chunk(4, dim=-1)
         x_a_1, x_b_1, x_a_2, x_b_2 = map(lambda t: t.reshape(-1, D, self.rank), (x_a_1, x_b_1, x_a_2, x_b_2))
 
@@ -82,20 +123,39 @@ class AdaLoRAMLP(nn.Module):
 
 class AdaLoRAWithBase(nn.Module):
     """
-    Feels like an AdaNorm kinda layer, but condition is projected into a LoRA which hidden states are pushed through
+    Like AdaLoRA but includes an additional base transformation, the fused LoRA is added
+    to base layer to produce final transformation
+
+    :param feat_dim: feature dimension
+    :param ada_dim: condition dimension
+    :param inter_dim: intermediate dimension, if act_fn is not None, this is the dimension
+                    of the hidden layer of the condition projection
+    :param rank: rank of the low rank matrices
+    :param lora_proj_act_fn: activation function for the hidden layer of the condition projection
+    :param sparse_heads: number of heads to use for the sparse projection, set to None for dense projection
+    :param residual: whether to add residual connection
     """
 
-    def __init__(self, feat_dim, ada_dim, inter_dim=None, rank=8, act_fn=nn.GELU, sparse_heads=None, residual=True):
+    def __init__(self,
+                 feat_dim,
+                 ada_dim,
+                 inter_dim=None,
+                 rank=8,
+                 lora_proj_act_fn = nn.GELU,
+                 sparse_heads=None,
+                 residual=True,
+                    norm_cond=True
+                 ):
         super().__init__()
         self.rank = rank
         self.base_layer = nn.Parameter(torch.randn(feat_dim, feat_dim))
         layers = []
         inter_dim = ada_dim if inter_dim is None else inter_dim
-        if act_fn is None:
+        if lora_proj_act_fn is None:
             layers.append(nn.Linear(ada_dim, feat_dim * rank * 2))
         else:
             layers.append(nn.Linear(ada_dim, inter_dim))
-            layers.append(act_fn())
+            layers.append(lora_proj_act_fn())
             layers.append(
                 AlmostMonarch(inter_dim, feat_dim * rank * 2, sparse_heads) if sparse_heads is not None else nn.Linear(
                     inter_dim, feat_dim * rank * 2))
@@ -103,11 +163,12 @@ class AdaLoRAWithBase(nn.Module):
         self.gen_weight = nn.Sequential(*layers)
 
         self.residual = lambda x, y: x + y if residual else y
+        self.norm_cond = nn.LayerNorm(ada_dim) if norm_cond else nn.Identity()
 
     def forward(self, x, ada_emb):
         x_in = x
         B, D = x.shape[0], x.shape[-1]
-        x_weights = self.gen_weight(ada_emb)
+        x_weights = self.gen_weight(self.norm_cond(ada_emb))
         x_a, x_b = x_weights.chunk(2, dim=-1)
         x_a, x_b = map(lambda t: t.reshape(-1, D, self.rank), (x_a, x_b))
 
@@ -122,21 +183,43 @@ class AdaLoRAWithBase(nn.Module):
 
 class AdaLoRAMLPWithBase(nn.Module):
     """
-    Feels like an AdaNorm kinda layer, but condition is projected into a LoRA which hidden states are pushed through
+    Like AdaLoRAMLP but includes an additional base transformation, the fused LoRA is added
+    to base layer to produce final transformation
+
+    :param feat_dim: feature dimension
+    :param ada_dim: condition dimension
+    :param inter_dim: intermediate dimension, if act_fn is not None, this is the dimension
+                    of the hidden layer of the condition projection
+    :param rank: rank of the low rank matrices
+    :param lora_proj_act_fn: activation function for the hidden layer of the condition projection
+    :param sparse_heads: number of heads to use for the sparse projection, set to None for dense projection
+    :param lora_proj_act_fn: activation function to use between the two sets of A/B matrices
+    :param residual: whether to add residual connection
+    :param act_fn: activation function to use between the two sets of A/B matrices
     """
 
-    def __init__(self, feat_dim, ada_dim, inter_dim=None, rank=8, act_fn=nn.GELU, sparse_heads=None, residual=True):
+    def __init__(self,
+                 feat_dim,
+                 ada_dim,
+                 inter_dim=None,
+                 rank=8,
+                 lora_proj_act_fn=nn.GELU,
+                 act_fn=nn.GELU,
+                 sparse_heads=None,
+                 residual=True,
+                    norm_cond=True
+                 ):
         super().__init__()
         self.rank = rank
         layers = []
         self.base_up = nn.Parameter(torch.randn(feat_dim, feat_dim))
         self.base_down = nn.Parameter(torch.randn(feat_dim, feat_dim))
         inter_dim = ada_dim if inter_dim is None else inter_dim
-        if act_fn is None:
+        if lora_proj_act_fn is None:
             layers.append(nn.Linear(ada_dim, feat_dim * rank * 4))
         else:
             layers.append(nn.Linear(ada_dim, inter_dim))
-            layers.append(act_fn())
+            layers.append(lora_proj_act_fn())
             layers.append(
                 AlmostMonarch(inter_dim, feat_dim * rank * 4, sparse_heads) if sparse_heads is not None else nn.Linear(
                     inter_dim, feat_dim * rank * 4))
@@ -145,11 +228,12 @@ class AdaLoRAMLPWithBase(nn.Module):
         self.act_fn = act_fn()
 
         self.residual = lambda x, y: x + y if residual else y
+        self.norm_cond = nn.LayerNorm(ada_dim) if norm_cond else nn.Identity()
 
     def forward(self, x, ada_emb):
         x_in = x
         B, D = x.shape[0], x.shape[-1]
-        x_weights = self.gen_weight(ada_emb)
+        x_weights = self.gen_weight(self.norm_cond(ada_emb))
         x_a_1, x_b_1, x_a_2, x_b_2 = x_weights.chunk(4, dim=-1)
         x_a_1, x_b_1, x_a_2, x_b_2 = map(lambda t: t.reshape(-1, D, self.rank), (x_a_1, x_b_1, x_a_2, x_b_2))
 
@@ -160,6 +244,7 @@ class AdaLoRAMLPWithBase(nn.Module):
         x_down = self.base_down[None, ...] + x_down
 
         x = torch.einsum('bdl,bd->bl', x_down, x)
+        x = self.act_fn(x)
         x = torch.einsum('bkl,bl->bk', x_up, x)
 
         return self.residual(x_in, x)
