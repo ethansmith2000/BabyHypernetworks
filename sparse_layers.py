@@ -81,13 +81,14 @@ class BlockwiseDiagLinear(nn.Module):
     :param bias: whether to add a bias term
     """
 
-    def __init__(self, full_in_dim=1024, full_out_dim=1024, heads=8, bias=True):
+    def __init__(self, full_in_dim=1024, full_out_dim=1024, heads=8, bias=True, has_token_dim=False):
         super(BlockwiseDiagLinear, self).__init__()
         self.full_in = full_in_dim
         self.full_out = full_out_dim
         self.in_dim = full_in_dim // heads
         self.out_dim = full_out_dim // heads
         self.h = heads
+        self.t = None
 
         # weights init
         weights = [torch.randn(self.in_dim, self.out_dim) for _ in range(heads)]
@@ -98,16 +99,39 @@ class BlockwiseDiagLinear(nn.Module):
         # optionals
         self.bias_add = BiasAdd(self.full_out) if bias else nn.Identity()
 
+        if has_token_dim:
+            self.reshape_in = self.tokens_to_batch
+            self.reshape_out = self.batch_to_tokens
+        else:
+            self.reshape_in = nn.Identity()
+            self.reshape_out = nn.Identity()
+
     def extra_repr(self):
         return f"full_in={self.full_in}, full_out={self.full_out}, heads={self.h}, total_params={self.full_in * self.full_out / self.h}"
 
-    def forward(self, x):
-        b, h, in_dim = x.shape[0], self.h, self.in_dim
-        x = x.reshape(b, h, in_dim)
+    def tokens_to_batch(self, x):
+        b, t, d = x.shape
+        self.t = t
+        return x.reshape(b * t, d)
+
+    def batch_to_tokens(self, x):
+        bt, d = x.shape
+        return x.reshape(bt // self.t, self.t, d)
+
+    def inner_forward(self, x):
+        h, in_dim = self.h, self.in_dim
+        x = x.reshape(-1, h, in_dim)
         x = torch.einsum('bhd,hdl->bhl', x, self.weight)
-        x = x.reshape(b, h * self.out_dim)
-        x = self.permute(x)
+        x = x.reshape(-1, h * self.out_dim)
+        x = self.bias_add(x)
         return x
+
+    def forward(self, x):
+        x = self.reshape_in(x)
+        x = self.inner_forward(x)
+        x = self.reshape_out(x)
+        return x
+
 
 
 class AlmostMonarch(nn.Module):

@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from .sparse_layers import AlmostMonarch, MothMatrix
+from sparse_layers import AlmostMonarch, MothMatrix
 import torch.nn.functional as F
 
 
@@ -9,9 +9,21 @@ class HyperAttentionLinear(nn.Module):
     """
     HyperAttention. Do perceiver attention to create weight matrix that is (dim*2 x dim), chunk it
     then use it as an MLP with activation to inputs
+
+    :param x_dim_in: input dimension of our produced weight matrix
+    :param x_dim_out: output dimension of our produced weight matrix
+    :param hidden_attn_dim: hidden dimension to perform attention at
+    :param kv_dim: key and value dimension if using seperate vector for conditioning
+    :param heads: number of attention heads
     """
 
-    def __init__(self, x_dim_in, x_dim_out, hidden_attn_dim=None, kv_dim=None, heads=8):
+    def __init__(self, 
+                x_dim_in, 
+                x_dim_out, 
+                hidden_attn_dim=None, 
+                kv_dim=None, 
+                heads=8
+                ):
         super().__init__()
         self.h = heads
         # if no external condition, x will be the input used to create the weight matrix
@@ -64,9 +76,21 @@ class HyperAttentionMLP(nn.Module):
     """
     HyperAttention. Do perceiver attention to create weight matrix that is (dim*2 x dim), chunk it
     then use it as an MLP with activation to inputs
+
+    :param x_dim_in: input and output dimension of our produced weight matrix
+    :param hidden_dim: hidden dimension of our produced weight matrix
+    :param hidden_attn_dim: hidden dimension to perform attention at
+    :param kv_dim: key and value dimension if using seperate vector for conditioning
+    :param heads: number of attention heads
     """
 
-    def __init__(self, x_dim, hidden_dim, hidden_attn_dim=None, kv_dim=None, heads=8):
+    def __init__(self, 
+                x_dim, 
+                hidden_dim, 
+                hidden_attn_dim=None, 
+                kv_dim=None, 
+                heads=8
+                ):
         super().__init__()
         self.h = heads
         # if no external condition, x will be the input used to create the weight matrix
@@ -126,10 +150,21 @@ class HyperAttentionAttention(nn.Module):
     """
     HyperAttention. Do perceiver attention to create query, key, value, and out matrices
     then use that for attention
-    if you're a bit unhinged, this could technically be done recursively forever until you OOM
+
+    :param x_dim: input and output dimension of our produced weight matrix
+    :param hidden_dim: hidden dimension of our produced weight matrix
+    :param hidden_attn_dim: hidden dimension to perform attention at
+    :param kv_dim: key and value dimension if using seperate vector for conditioning
+    :param heads: number of attention heads
     """
 
-    def __init__(self, x_dim, hidden_dim, hidden_attn_dim=None, kv_dim=None, heads=8):
+    def __init__(self, 
+                x_dim, 
+                hidden_dim, 
+                hidden_attn_dim=None, 
+                kv_dim=None, 
+                heads=8
+                ):
         super().__init__()
         self.h = heads
         # if no external condition, x will be the input used to create the weight matrix
