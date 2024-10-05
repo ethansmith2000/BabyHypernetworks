@@ -169,6 +169,7 @@ class MothMatrix(nn.Module):
     """
     half the parameters of a monarch matrix
     shuffles features, does a computation, then unshuffles as to respect residual stream
+    renamed from based on https://github.com/ethansmith2000/SparseNetworks
     """
 
     def __init__(self,
