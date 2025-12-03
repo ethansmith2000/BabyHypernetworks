@@ -1,7 +1,21 @@
+import math
 import torch
 from torch import nn
 from sparse_layers import AlmostMonarch, MothMatrix
 import torch.nn.functional as F
+
+
+def _dense_target_std(fan_in: int, fan_out: int) -> float:
+    return math.sqrt(2.0 / (fan_in + fan_out))
+
+
+def _scale_tensor_std(tensor: torch.Tensor, target_std: float, eps: float = 1e-8) -> torch.Tensor:
+    if tensor.dim() < 2:
+        raise ValueError("HyperAttention tensors must be at least 2D.")
+    flat_std = tensor.flatten(1).std(dim=1, keepdim=True, unbiased=False)
+    scale = target_std / (flat_std + eps)
+    reshape_dims = [tensor.shape[0]] + [1] * (tensor.dim() - 1)
+    return tensor * scale.view(*reshape_dims)
 
 
 class HyperAttentionLinear(nn.Module):
@@ -31,14 +45,17 @@ class HyperAttentionLinear(nn.Module):
         # if no hidden_dim, use x_dim_out
         hidden_attn_dim = hidden_attn_dim or x_dim_out
         self.head_dim = hidden_attn_dim // heads
+        self.layer_std = _dense_target_std(x_dim_in, x_dim_out)
 
         # a learnable weight matrix, is used as queries and is combined with the attention output to give final weight matrix
         base_weight = torch.empty(1, x_dim_in, x_dim_out)
         torch.nn.init.kaiming_uniform_(base_weight)
         self.base_weight = torch.nn.Parameter(base_weight)
+        query_seed = torch.empty(1, x_dim_in, hidden_attn_dim)
+        torch.nn.init.kaiming_uniform_(query_seed)
+        self.query_seed = torch.nn.Parameter(query_seed)
 
         # attention weights
-        self.q_proj = nn.Linear(x_dim_out, hidden_attn_dim, bias=False)
         self.kv_norm = nn.LayerNorm(kv_dim)
         self.kv_proj = nn.Linear(kv_dim, hidden_attn_dim * 2, bias=False)
         self.to_out = nn.Linear(hidden_attn_dim, x_dim_out)
@@ -52,14 +69,15 @@ class HyperAttentionLinear(nn.Module):
         L, Co = self.base_weight.shape[1:]
         base_weight = self.base_weight.expand(B, -1, -1)
 
-        # base weight serves as queries
-        queries = self.q_proj(base_weight)
+        # learned queries already in attention hidden space
+        queries = self.query_seed.expand(B, -1, -1)
         norm_kv = self.kv_norm(context)
         k, v = map(lambda t: t.reshape(B, N, self.h, self.head_dim).transpose(1, 2), self.kv_proj(norm_kv).chunk(2, dim=-1))
         q = queries.reshape(B, L, self.h, self.head_dim).transpose(1, 2)
 
         attn_out = F.scaled_dot_product_attention(q, k, v).transpose(1, 2).reshape(B, L, hd)
         attn_out = self.to_out(attn_out)
+        attn_out = _scale_tensor_std(attn_out, self.layer_std)
 
         # b, c, c_out
         layer = base_weight + attn_out
@@ -107,12 +125,16 @@ class HyperAttentionMLP(nn.Module):
         base_weight = torch.cat([base_down, base_up.transpose(1, 2)], dim=1)
         self.base_weight = torch.nn.Parameter(base_weight)
 
-        self.q_proj = nn.Linear(x_dim, hidden_attn_dim, bias=False)
+        query_seed = torch.empty(1, hidden_dim + x_dim, hidden_attn_dim)
+        torch.nn.init.kaiming_uniform_(query_seed)
+        self.query_seed = nn.Parameter(query_seed)
         self.kv_norm = nn.LayerNorm(kv_dim)
         self.kv_proj = nn.Linear(kv_dim, hidden_attn_dim * 2, bias=False)
         self.to_out = nn.Linear(hidden_attn_dim, x_dim)
 
         self.act_fn = nn.GELU()
+        self.up_std = _dense_target_std(x_dim, hidden_dim)
+        self.down_std = _dense_target_std(hidden_dim, x_dim)
 
     def forward(self, x, context=None):
         # we can use external context or the input itself to guide the weight matrix creation
@@ -122,8 +144,8 @@ class HyperAttentionMLP(nn.Module):
         hd = self.q_proj.out_features
         base_weight = self.base_weight.expand(B, -1, -1)
 
-        # base weight serves as queries
-        queries = self.q_proj(base_weight)
+        # learned queries already in attention hidden space
+        queries = self.query_seed.expand(B, -1, -1)
         norm_kv = self.kv_norm(context)
         k, v = map(lambda t: t.reshape(B, N, self.h, self.head_dim).transpose(1, 2), self.kv_proj(norm_kv).chunk(2, dim=-1))
         q = queries.reshape(B, L, self.h, self.head_dim).transpose(1, 2)
@@ -136,6 +158,8 @@ class HyperAttentionMLP(nn.Module):
 
         # chunk to get up and down
         up, down = layer.chunk(2, dim=1)
+        up = _scale_tensor_std(up, self.up_std)
+        down = _scale_tensor_std(down, self.down_std)
 
         # apply our new layer to x
         x = torch.einsum('bnd,bld->bnl', x, up)
@@ -180,12 +204,16 @@ class HyperAttentionAttention(nn.Module):
         base_weight = torch.cat([query, key, value, to_out.transpose(1, 2)], dim=1)
         self.base_weight = torch.nn.Parameter(base_weight)
 
-        self.q_proj = nn.Linear(hidden_dim, hidden_attn_dim, bias=False)
+        query_seed = torch.empty(1, 4 * x_dim, hidden_attn_dim)
+        torch.nn.init.kaiming_uniform_(query_seed)
+        self.query_seed = nn.Parameter(query_seed)
         self.kv_norm = nn.LayerNorm(kv_dim)
         self.kv_proj = nn.Linear(kv_dim, hidden_attn_dim * 2, bias=False)
         self.to_out = nn.Linear(hidden_attn_dim, hidden_dim)
 
         self.act_fn = nn.GELU()
+        self.qkv_std = _dense_target_std(x_dim, hidden_dim)
+        self.o_std = _dense_target_std(hidden_dim, x_dim)
 
     def forward(self, x, context=None):
         # we can use external context or the input itself to guide the weight matrix creation
@@ -195,8 +223,8 @@ class HyperAttentionAttention(nn.Module):
         hd = self.q_proj.out_features
         base_weight = self.base_weight.expand(B, -1, -1)
 
-        # base weight serves as queries
-        queries = self.q_proj(base_weight)
+        # learned queries already in attention hidden space
+        queries = self.query_seed.expand(B, -1, -1)
         norm_kv = self.kv_norm(context)
         k, v = map(lambda t: t.reshape(B, N, self.h, self.head_dim).transpose(1, 2), self.kv_proj(norm_kv).chunk(2, dim=-1))
         q = queries.reshape(B, L, self.h, self.head_dim).transpose(1, 2)
@@ -207,8 +235,12 @@ class HyperAttentionAttention(nn.Module):
         # b, dim * 4, c_out
         layer = base_weight + attn_out
 
-        # chunk to get up and down
+        # chunk to get query/key/value/out projections
         q_proj, k_proj, v_proj, o_proj = layer.chunk(4, dim=1)
+        q_proj = _scale_tensor_std(q_proj, self.qkv_std)
+        k_proj = _scale_tensor_std(k_proj, self.qkv_std)
+        v_proj = _scale_tensor_std(v_proj, self.qkv_std)
+        o_proj = _scale_tensor_std(o_proj, self.o_std)
 
         # apply our new layer to x
         q2 = torch.einsum('bnd,bdl->bnl', x, q_proj)

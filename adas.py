@@ -1,3 +1,4 @@
+import math
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -26,6 +27,20 @@ class AdaLoRAMixin(nn.Module):
         x = self.inner_forward(x, ada_emb)
         x = self.reshape_out(x)
         return x
+
+    def _lora_target_stds(self):
+        target_var = 1.0 / self.feat_dim
+        down_std = 1.0 / math.sqrt(self.feat_dim)
+        up_std = math.sqrt(target_var / (self.rank * down_std ** 2))
+        return down_std, up_std
+
+    def _scale_tensor_std(self, tensor, target_std, eps=1e-8):
+        if tensor.dim() == 1:
+            raise ValueError("LoRA tensors must have at least two dims.")
+        flat_std = tensor.flatten(1).std(dim=1, keepdim=True, unbiased=False)
+        scale = target_std / (flat_std + eps)
+        reshape_dims = [tensor.shape[0]] + [1] * (tensor.dim() - 1)
+        return tensor * scale.view(*reshape_dims)
 
 
 class AdaLoRA(AdaLoRAMixin):
@@ -60,19 +75,10 @@ class AdaLoRA(AdaLoRAMixin):
                  ):
         super().__init__()
         self.rank = rank
-        layers = []
+        self.feat_dim = feat_dim
         ada_dim = feat_dim if ada_dim is None else ada_dim
-        inter_dim = ada_dim if inter_dim is None else inter_dim
-        if lora_proj_act_fn is None:
-            layers.append(nn.Linear(ada_dim, feat_dim * rank * 2))
-        else:
-            layers.append(nn.Linear(ada_dim, inter_dim))
-            layers.append(lora_proj_act_fn())
-            layers.append(
-                AlmostMonarch(inter_dim, feat_dim * rank * 2, sparse_heads) if sparse_heads is not None else nn.Linear(
-                    inter_dim, feat_dim * rank * 2))
 
-        self.gen_weight = nn.Sequential(*layers)
+        self.gen_weight = nn.Linear(ada_dim, feat_dim * rank * 2)
         self.norm_cond = nn.LayerNorm(ada_dim) if norm_cond else nn.Identity()
         self.post_init(has_token_dim)
 
@@ -83,6 +89,11 @@ class AdaLoRA(AdaLoRAMixin):
         x_weights = self.gen_weight(self.norm_cond(ada_emb))
         x_a, x_b = x_weights.chunk(2, dim=-1)
         x_a, x_b = map(lambda t: t.reshape(-1, D, self.rank), (x_a, x_b))
+        
+        # Match dense Linear variance with per-sample normalization (avoid batch mixing)
+        down_std, up_std = self._lora_target_stds()
+        x_a = self._scale_tensor_std(x_a, down_std)
+        x_b = self._scale_tensor_std(x_b, up_std)
 
         # we've permuted tokens to batch dim, but we may only have an ada_emb per batch, 
         # so we will need to broadcast if this is the case
@@ -127,6 +138,7 @@ class AdaLoRAMLP(AdaLoRAMixin):
                  ):
         super().__init__()
         self.rank = rank
+        self.feat_dim = feat_dim
         layers = []
         ada_dim = feat_dim if ada_dim is None else ada_dim
         inter_dim = ada_dim if inter_dim is None else inter_dim
@@ -151,6 +163,12 @@ class AdaLoRAMLP(AdaLoRAMixin):
         x_weights = self.gen_weight(self.norm_cond(ada_emb))
         x_a_1, x_b_1, x_a_2, x_b_2 = x_weights.chunk(4, dim=-1)
         x_a_1, x_b_1, x_a_2, x_b_2 = map(lambda t: t.reshape(-1, D, self.rank), (x_a_1, x_b_1, x_a_2, x_b_2))
+        
+        down_std, up_std = self._lora_target_stds()
+        x_a_1 = self._scale_tensor_std(x_a_1, down_std)
+        x_b_1 = self._scale_tensor_std(x_b_1, up_std)
+        x_a_2 = self._scale_tensor_std(x_a_2, down_std)
+        x_b_2 = self._scale_tensor_std(x_b_2, up_std)
 
         # we've permuted tokens to batch dim, but we may only have an ada_emb per batch, 
         # so we will need to broadcast if this is the case
@@ -199,6 +217,7 @@ class AdaLoRAWithBase(AdaLoRAMixin):
                  ):
         super().__init__()
         self.rank = rank
+        self.feat_dim = feat_dim
         self.base_layer = nn.Parameter(torch.randn(feat_dim, feat_dim))
         layers = []
         ada_dim = feat_dim if ada_dim is None else ada_dim
@@ -225,6 +244,10 @@ class AdaLoRAWithBase(AdaLoRAMixin):
         x_weights = self.gen_weight(self.norm_cond(ada_emb))
         x_a, x_b = x_weights.chunk(2, dim=-1)
         x_a, x_b = map(lambda t: t.reshape(-1, D, self.rank), (x_a, x_b))
+        
+        down_std, up_std = self._lora_target_stds()
+        x_a = self._scale_tensor_std(x_a, down_std)
+        x_b = self._scale_tensor_std(x_b, up_std)
 
         # fuse
         layer = torch.einsum('bdr,brk->bdk', x_a, x_b.transpose(1, 2))
@@ -272,6 +295,7 @@ class AdaLoRAMLPWithBase(AdaLoRAMixin):
                  ):
         super().__init__()
         self.rank = rank
+        self.feat_dim = feat_dim
         layers = []
         self.base_up = nn.Parameter(torch.randn(feat_dim, feat_dim))
         self.base_down = nn.Parameter(torch.randn(feat_dim, feat_dim))
@@ -300,6 +324,12 @@ class AdaLoRAMLPWithBase(AdaLoRAMixin):
         x_weights = self.gen_weight(self.norm_cond(ada_emb))
         x_a_1, x_b_1, x_a_2, x_b_2 = x_weights.chunk(4, dim=-1)
         x_a_1, x_b_1, x_a_2, x_b_2 = map(lambda t: t.reshape(-1, D, self.rank), (x_a_1, x_b_1, x_a_2, x_b_2))
+        
+        down_std, up_std = self._lora_target_stds()
+        x_a_1 = self._scale_tensor_std(x_a_1, down_std)
+        x_b_1 = self._scale_tensor_std(x_b_1, up_std)
+        x_a_2 = self._scale_tensor_std(x_a_2, down_std)
+        x_b_2 = self._scale_tensor_std(x_b_2, up_std)
 
         x_up = torch.einsum('bdr,brk->bdk', x_a_1, x_b_1.transpose(1, 2))
         x_down = torch.einsum('bdr,brk->bdk', x_a_2, x_b_2.transpose(1, 2))
