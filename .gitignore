@@ -2,3 +2,5 @@ data
 images
 logs
 wandb
+__pycache__
+vit-cifar-out

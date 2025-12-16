@@ -103,58 +103,50 @@ class HyperAttentionMLP(nn.Module):
     """
 
     def __init__(self, 
-                x_dim, 
-                hidden_dim, 
-                hidden_attn_dim=None, 
-                kv_dim=None, 
-                heads=8
+                dim, 
+                heads=8,
+                ff_mult=2
                 ):
         super().__init__()
         self.h = heads
-        # if no external condition, x will be the input used to create the weight matrix
-        kv_dim = kv_dim or x_dim
-        # if no hidden_dim, use x_dim_out
-        hidden_attn_dim = hidden_attn_dim or x_dim
-        self.head_dim = hidden_attn_dim // heads
+        self.head_dim = dim // heads
+        self.ff_dim = dim * ff_mult
 
-        base_up = torch.randn(1, x_dim, hidden_dim)
-        base_down = torch.randn(1, hidden_dim, x_dim)
-        torch.nn.init.kaiming_uniform_(base_up)
-        torch.nn.init.kaiming_uniform_(base_down)
+        self.temp = nn.Parameter(torch.ones(1, self.h, 1, 1) * 10)
 
-        base_weight = torch.cat([base_down, base_up.transpose(1, 2)], dim=1)
-        self.base_weight = torch.nn.Parameter(base_weight)
-
-        query_seed = torch.empty(1, hidden_dim + x_dim, hidden_attn_dim)
-        torch.nn.init.kaiming_uniform_(query_seed)
+        # we need 2 * ff_dim tokens so chunking yields up and down matrices
+        query_seed = torch.empty(1, self.ff_dim * 2, dim)
+        torch.nn.init.xavier_normal_(query_seed)
         self.query_seed = nn.Parameter(query_seed)
-        self.kv_norm = nn.LayerNorm(kv_dim)
-        self.kv_proj = nn.Linear(kv_dim, hidden_attn_dim * 2, bias=False)
-        self.to_out = nn.Linear(hidden_attn_dim, x_dim)
+
+        self.norm = lambda x: F.normalize(x, p=2, dim=-1)
+
+        self.kv_proj = nn.Linear(dim, dim * 2, bias=False)
+        self.to_out = nn.Linear(dim, dim)
 
         self.act_fn = nn.GELU()
-        self.up_std = _dense_target_std(x_dim, hidden_dim)
-        self.down_std = _dense_target_std(hidden_dim, x_dim)
+        self.up_std = _dense_target_std(dim, self.ff_dim)
+        self.down_std = _dense_target_std(self.ff_dim, dim)
 
-    def forward(self, x, context=None):
+    def forward(self, x):
         # we can use external context or the input itself to guide the weight matrix creation
-        context = context if context is not None else x
-        B, N, Ci = context.shape
-        L = self.base_weight.shape[1]
-        hd = self.q_proj.out_features
-        base_weight = self.base_weight.expand(B, -1, -1)
+        B, N, dim = x.shape
+        q_toks = self.query_seed.shape[1]
 
         # learned queries already in attention hidden space
         queries = self.query_seed.expand(B, -1, -1)
-        norm_kv = self.kv_norm(context)
-        k, v = map(lambda t: t.reshape(B, N, self.h, self.head_dim).transpose(1, 2), self.kv_proj(norm_kv).chunk(2, dim=-1))
-        q = queries.reshape(B, L, self.h, self.head_dim).transpose(1, 2)
+        k, v = map(lambda t: t.reshape(B, N, self.h, self.head_dim).transpose(1, 2), self.kv_proj(x).chunk(2, dim=-1))
+        q = queries.reshape(B, q_toks, self.h, self.head_dim).transpose(1, 2)
 
-        attn_out = F.scaled_dot_product_attention(q, k, v).transpose(1, 2).reshape(B, L, hd)
+        q = self.norm(q)
+        k = self.norm(k)
+        q = q * self.temp
+
+        attn_out = F.scaled_dot_product_attention(q, k, v, scale=1.0).transpose(1, 2).reshape(B, q_toks, dim)
         attn_out = self.to_out(attn_out)
 
         # b, ff_dim * 2, c_out
-        layer = base_weight + attn_out
+        layer = attn_out
 
         # chunk to get up and down
         up, down = layer.chunk(2, dim=1)
