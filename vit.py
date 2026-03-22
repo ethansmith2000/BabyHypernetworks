@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from attentions import HyperAttentionMLP
+# from attentions import HyperAttentionMLP
 
 class Attention(nn.Module):
     def __init__(self, dim, heads):
@@ -38,8 +38,8 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.attn = Attention(dim, heads)
         self.ff = HyperAttentionMLP(dim, heads=heads, ff_mult=ff_hidden_dim // dim) if use_hyper_ff else FeedForward(dim, ff_hidden_dim)
-        self.norm1 = nn.LayerNorm(dim)
-        self.norm2 = nn.LayerNorm(dim)
+        self.norm1 = nn.RMSNorm(dim)
+        self.norm2 = nn.RMSNorm(dim)
 
     def forward(self, x):
         x = self.attn(self.norm1(x)) + x
@@ -90,7 +90,7 @@ class VisionTransformer(nn.Module):
         self.position_embedding = nn.Parameter(torch.randn(1, num_patches + (1 if use_cls_token else 0), dim))
 
         self.in_proj = nn.Sequential(
-            nn.LayerNorm(dim),
+            nn.RMSNorm(dim),
             nn.Linear(dim, dim),
         )
         # ff_mode controls use of hyper MLPs:
@@ -107,7 +107,7 @@ class VisionTransformer(nn.Module):
             blocks.append(TransformerBlock(dim, heads, dim * ff_mult, use_hyper_ff=use_hyper))
         self.blocks = nn.ModuleList(blocks)
         self.out_proj = nn.Sequential(
-            nn.LayerNorm(dim),
+            nn.RMSNorm(dim),
             nn.Linear(dim, num_classes),
         )
         self.gradient_checkpointing = gradient_checkpointing
@@ -121,9 +121,8 @@ class VisionTransformer(nn.Module):
                 nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="relu")
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.LayerNorm):
+            elif isinstance(module, nn.RMSNorm):
                 nn.init.ones_(module.weight)
-                nn.init.zeros_(module.bias)
             elif isinstance(module, nn.Parameter):
                 continue
 
